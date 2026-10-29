@@ -384,6 +384,8 @@ class ServerDevice:
                 block_frame = int(self.currentInputChunkNum * 128 * (self.settings.serverInputAudioSampleRate / 48000))
 
                 sd.default.blocksize = block_frame
+                # sounddevice defaults to "high" latency, which adds host-API buffering on top of the chunk
+                sd.default.latency = ("low", "low")
 
                 # main loop
                 try:

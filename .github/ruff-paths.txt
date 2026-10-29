@@ -1,0 +1,14 @@
+server/voice_changer/RVC/embedder/hubert_lite.py
+server/voice_changer/RVC/embedder/HubertLiteEmbedder.py
+server/voice_changer/RVC/embedder/EmbedderManager.py
+server/voice_changer/RVC/pipeline
+server/voice_changer/RVC/pitchExtractor/PitchExtractor.py
+server/voice_changer/RVC/pitchExtractor/PitchExtractorManager.py
+server/voice_changer/RVC/pitchExtractor/RMVPEPitchExtractor.py
+server/voice_changer/RVC/pitchExtractor/FcpePitchExtractor.py
+server/voice_changer/RVC/inferencer/rvc_models/infer_pack/fast_infer.py
+server/voice_changer/utils/mel.py
+server/voice_changer/utils/resample.py
+server/downloader/WeightDownloader.py
+bench
+tests

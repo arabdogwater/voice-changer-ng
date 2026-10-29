@@ -32,7 +32,6 @@ from voice_changer.utils.VoiceChangerParams import VoiceChangerParams  # noqa: E
 from voice_changer.ModelSlotManager import ModelSlotManager  # noqa: E402
 from voice_changer.RVC.RVCr2 import RVCr2  # noqa: E402
 from voice_changer.VoiceChangerV2 import VoiceChangerV2  # noqa: E402
-from voice_changer.RVC.pipeline import Pipeline as P  # noqa: E402
 
 params = VoiceChangerParams(
     model_dir="model_dir", content_vec_500="", content_vec_500_onnx="", content_vec_500_onnx_on=False,

@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install (CPU torch is enough for the test suite)
+        run: |
+          uv venv
+          uv pip install "torch==2.11.*" "torchaudio==2.11.*" --index-url https://download.pytorch.org/whl/cpu
+          uv pip install numpy onnxruntime safetensors soxr soundfile pytest ruff
+      - name: Lint (new engine code)
+        run: .venv/bin/ruff check $(cat .github/ruff-paths.txt)
+      - name: Test
+        run: .venv/bin/python -m pytest -q
