@@ -69,6 +69,11 @@ Engines depend on (model, chunk, crossfade, extra rounding). Building while audi
 ## Benchmarks
 `bench/bench_rest.py --url … --label X` streams `server/test.wav` through `/test` in fixed chunks for chunk × extraConvertSize configs, writes `bench/out/X.json` + wavs. `bench/profile_pipeline.py` is the in-process profiler (`--stages` forces eager to time stages).
 
+Benchmark pitfalls (all hit once):
+- Windows lets two servers listen on the same port; a stale server silently answers. Before every run check `/info` → `pipelineInfo` shows `cudaGraphs` / `tensorrt` of the code you expect, and make sure no old `MMVCServerSIO.py` tree is alive.
+- The GPU is shared with the desktop, so back-to-back runs drift by several ms. Compare variants with `bench/ab_tensorrt.py`-style interleaving, not separate runs.
+- `bench_rest.py` saves audio keyed by input position (always starts at the file start). Runs recorded before 2026-10-30 started at chunk `warmup % n_chunks`; only compare runs made with the same `--warmup` (`old_rmvpe`, `final_rmvpe` both used 8).
+
 ## Quality check
 `bench/compare_audio.py --a old --b new`: loudness-normalised log-mel distance, RMVPE pitch error (cents), V/UV agreement, loudness. Compare against a new-vs-new run to know the noise floor (RVC is stochastic).
 

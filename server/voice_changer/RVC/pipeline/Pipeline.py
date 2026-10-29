@@ -78,7 +78,14 @@ class Pipeline(object):
             "isHalf": self.isHalf,
             "index": "gpu-exact" if self.index is not None else "none",
             "cudaGraphs": self.graphable(),
+            "tensorrt": self._trt_status(),
         }
+
+    def _trt_status(self) -> str:
+        trt = getattr(getattr(self.inferencer, "model", None), "trt_decoder", None)
+        if trt is None:
+            return "off"
+        return f"{len(trt.engines)} engine(s) ready, {len(trt.building) - len(trt.engines) - len(trt.failed)} building, {len(trt.failed)} failed"
 
     def setPitchExtractor(self, pitchExtractor: PitchExtractor):
         self.pitchExtractor = pitchExtractor

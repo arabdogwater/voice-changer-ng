@@ -2,13 +2,32 @@
 
 [![CI](https://github.com/arabdogwater/voice-changer-ng/actions/workflows/ci.yml/badge.svg)](https://github.com/arabdogwater/voice-changer-ng/actions/workflows/ci.yml)
 
-A next-gen fork of [w-okada/voice-changer](https://github.com/w-okada/voice-changer) (MMVCServerSIO / VC Client) with a rewritten **RVC engine**: same models, same web UI, same API, **~4x lower per-chunk processing time and real-time at chunk sizes the original can't sustain**.
+A next-gen fork of [w-okada/voice-changer](https://github.com/w-okada/voice-changer) (MMVCServerSIO / VC Client) with a rewritten **RVC engine**: same models, same web UI, same API, **4.5–5.6x lower per-chunk latency end to end** and real time at chunk sizes the original can't sustain.
 
 Upstream's open-source v1 line has been frozen since early 2024 (Python 3.10, torch 2.0, fairseq). This fork moves it to Python 3.12 / PyTorch 2.11 / CUDA 12.8 and rebuilds the RVC hot path around the GPU.
 
 ## Results (RTX 3070, RVC v2 48 kHz model, RMVPE, measured end-to-end through the REST API)
 
-BENCH_TABLE
+| chunk | extra | original exe p50 / p95 (ms) | voice-changer-ng p50 / p95 (ms) | speed-up (p50) |
+|---|---|---|---|---|
+| 1024 (21 ms) | 4096 | – | 13.2 / 30.4 ❌ | – |
+| 1024 (21 ms) | 16384 | – | 14.3 / 31.0 ❌ | – |
+| 1024 (21 ms) | 131072 | – | 18.8 / 35.2 ❌ | – |
+| 2048 (43 ms) | 4096 | 76.4 / 105.6 ❌ | 14.4 / 31.5 ✅ | **5.3x** |
+| 2048 (43 ms) | 16384 | 78.0 / 96.4 ❌ | 14.3 / 30.8 ✅ | **5.5x** |
+| 2048 (43 ms) | 131072 | 89.4 / 126.1 ❌ | 19.8 / 40.8 ✅ | **4.5x** |
+| 4096 (85 ms) | 4096 | 81.5 / 148.4 ❌ | 14.6 / 37.3 ✅ | **5.6x** |
+| 4096 (85 ms) | 16384 | 76.5 / 97.9 ❌ | 14.6 / 34.2 ✅ | **5.2x** |
+| 4096 (85 ms) | 131072 | 95.7 / 125.7 ❌ | 19.5 / 36.8 ✅ | **4.9x** |
+| 8192 (171 ms) | 4096 | 79.1 / 101.0 ✅ | 15.9 / 18.9 ✅ | **5.0x** |
+| 8192 (171 ms) | 16384 | 76.5 / 89.2 ✅ | 16.0 / 23.4 ✅ | **4.8x** |
+| 8192 (171 ms) | 131072 | 95.4 / 117.2 ✅ | 20.5 / 40.3 ✅ | **4.7x** |
+
+✅ = p95 below the chunk duration (keeps up in real time), ❌ = falls behind. The original exe has a ~76 ms floor per chunk no matter how small the chunk is, so it never keeps up below ~170 ms chunks; 1024-sample chunks were not measured on it (they cannot work with that floor).
+
+**TensorRT (`--tensorrt true`)** on top, measured as an interleaved A/B in one process so both variants see the same background GPU load: **12.6 → 10.6 ms p50 per chunk** (≈ −2 ms, ~16 %), and in a server run 10.7 / 14.2 ms p50 / p95 at 1024-sample (21 ms) chunks. Audio vs the PyTorch decoder: 1.6–1.8 dB mel distance and 3–4 cents, i.e. inside the run-to-run noise floor.
+
+Numbers include ~4 ms of HTTP/JSON overhead per chunk (the `/test` REST endpoint both servers share); the pipeline itself takes ~10–12 ms in-process. They were taken on a desktop GPU that was also driving the display and other apps, so expect a few ms of run-to-run drift.
 
 Same model, same input, same benchmark client (`bench/bench_rest.py`) against the original `MMVCServerSIO.exe` and this fork. "p95" is the 95th percentile of the per-chunk round trip; a chunk is real-time when that is below the chunk duration.
 
@@ -16,10 +35,10 @@ Same model, same input, same benchmark client (`bench/bench_rest.py`) against th
 
 | old exe vs this fork | value | run-to-run noise floor (fork vs itself) |
 |---|---|---|
-| log-mel distance | 1.9 – 3.3 dB | 1.3 – 2.0 dB |
-| median pitch difference | 4.5 – 7.5 cents (inaudible; a semitone is 100) | 2.3 – 5.4 cents |
-| voiced/unvoiced agreement | 94 – 99 % | 96 – 100 % |
-| loudness difference | within ±0.3 dB | within ±0.07 dB |
+| log-mel distance | 2.0 – 3.4 dB | 1.3 – 2.0 dB |
+| median pitch difference | 4.4 – 6.8 cents (inaudible; a semitone is 100) | 2.3 – 5.4 cents |
+| voiced/unvoiced agreement | 94 – 99.7 % | 96 – 100 % |
+| loudness difference | within ±0.2 dB (one config −1.3 dB) | within ±0.07 dB |
 
 ## What changed
 
@@ -34,7 +53,7 @@ Same model, same input, same benchmark client (`bench/bench_rest.py`) against th
 | Index (`.index`) | CPU faiss IVF search with GPU→CPU→GPU copies | exact nearest-neighbour search on the GPU | faster *and* more accurate than nprobe=1 IVF |
 | Buffers / resampling | numpy ring buffers, `resampy` on the CPU | GPU ring buffers, GPU resampling | 2 small host↔device copies per chunk |
 | Pitch + features | sequential | two CUDA streams inside the graph | the two latency-bound branches overlap |
-| TensorRT | – | optional fp16 decoder engines (`--tensorrt true`), built in the background, cached per model | decoder 4.15 → 1.75 ms |
+| TensorRT | – | optional fp16 decoder engines (`--tensorrt true`), pre-built once per voice + chunk size, cached | decoder 4.15 → 1.75 ms, whole chunk ≈ −2 ms |
 | Silence | RMS threshold only | optional Silero VAD gate (`--vad true`) | zero GPU work while nobody speaks, without letting fan/keyboard noise through |
 | Weights | downloads every model family's weights at boot (~2 GB); saved HTTP error pages as model files | core weights only, the rest on first use; atomic `.part` downloads, HTTP errors raise | faster first start, no corrupt "models" |
 | Model loading | `torch.load` (pickle, can run code) | PyTorch's `weights_only` loader (all 52 tested community `.pth` files load) | a random model from the internet can't execute code |
@@ -87,7 +106,7 @@ cd server && uv run --no-sync python tools/build_trt_engines.py --model_dir mode
 
 ### Recommended settings
 
-- **Chunk**: 2048 samples (43 ms) is comfortably real-time on an RTX 3070; try 1024 with TensorRT on.
+- **Chunk**: 2048 samples (43 ms) is comfortably real-time on an RTX 3070; 1024 (21 ms) works with TensorRT on.
 - **Extra (`extraConvertSize`)**: 16384–32768 gives the text encoder enough context; larger values now cost very little.
 - **F0**: `rmvpe` (GPU, graph-captured). `fcpe` also runs on the GPU but cannot be graph-captured, so it is slower here.
 - **NVIDIA Control Panel → Power management mode → Prefer maximum performance** for `python.exe`: the GPU otherwise downclocks between chunks, which costs a few ms.

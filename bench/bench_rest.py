@@ -70,7 +70,7 @@ def convert_chunk(base: str, chunk: np.ndarray) -> np.ndarray:
 
 
 def run_config(base: str, audio: np.ndarray, chunk: int, warmup: int, loops: int):
-    times, outs, bad = [], [], 0
+    times, outs, bad = [], {}, 0
     n_chunks = len(audio) // chunk
     total = warmup + n_chunks * loops
     for i in range(total):
@@ -81,9 +81,9 @@ def run_config(base: str, audio: np.ndarray, chunk: int, warmup: int, loops: int
         bad += len(out) != len(c)
         if i >= warmup:
             times.append(dt * 1000)
-            if i < warmup + n_chunks:
-                outs.append(out)
-    return np.array(times), np.concatenate(outs) if outs else np.zeros(0, np.int16), bad
+            outs.setdefault(i % n_chunks, out)  # keyed by input position: saved audio always starts at the file start
+    audio_out = np.concatenate([outs[k] for k in sorted(outs)]) if outs else np.zeros(0, np.int16)
+    return np.array(times), audio_out, bad
 
 
 def main():

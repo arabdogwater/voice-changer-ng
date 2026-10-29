@@ -32,14 +32,16 @@ def main():
     args = ap.parse_args()
     old, new, trt = load(args.old), load(args.new), load(args.trt)
     keys = sorted(set(old) | set(new) | set(trt))
-    print("| chunk | extra | original exe p50 / p95 (ms) | voice-changer-ng | ng + TensorRT | speed-up (p50) |")
-    print("|---|---|---|---|---|---|")
+    trt_col = bool(trt)
+    print("| chunk | extra | original exe p50 / p95 (ms) | voice-changer-ng p50 / p95 (ms) |" + (" ng + TensorRT |" if trt_col else "") + " speed-up (p50) |")
+    print("|---|---|---|---|" + ("---|" if trt_col else "") + "---|")
     for chunk, extra in keys:
         ms = chunk / 48
         o, n, t = old.get((chunk, extra)), new.get((chunk, extra)), trt.get((chunk, extra))
         best = min([x["p50"] for x in (n, t) if x is not None], default=None)
         speed = f"**{o['p50'] / best:.1f}x**" if o and best else "–"
-        print(f"| {chunk} ({ms:.0f} ms) | {extra} | {cell(o, ms)} | {cell(n, ms)} | {cell(t, ms)} | {speed} |")
+        trt_cell = f" {cell(t, ms)} |" if trt_col else ""
+        print(f"| {chunk} ({ms:.0f} ms) | {extra} | {cell(o, ms)} | {cell(n, ms)} |{trt_cell} {speed} |")
 
 
 if __name__ == "__main__":

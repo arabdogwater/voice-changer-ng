@@ -65,18 +65,19 @@ class TrtEngine:
         self.engine = self.runtime.deserialize_cuda_engine(engine_bytes)
         self.context = self.engine.create_execution_context()
         self.names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
-        self.outputs = {}
+        # persistent I/O buffers bound once: TensorRT keeps raw pointers, so they must outlive every
+        # (graph-captured) launch. Binding temporaries let later kernels overwrite the inputs.
+        self.inputs: dict[str, torch.Tensor] = {}
+        self.outputs: dict[str, torch.Tensor] = {}
         for n in self.names:
-            if self.engine.get_tensor_mode(n) == trt.TensorIOMode.OUTPUT:
-                self.outputs[n] = torch.empty(tuple(self.engine.get_tensor_shape(n)), dtype=torch.float32, device="cuda")
-                self.context.set_tensor_address(n, self.outputs[n].data_ptr())
+            buf = torch.empty(tuple(self.engine.get_tensor_shape(n)), dtype=torch.float32, device="cuda")
+            is_out = self.engine.get_tensor_mode(n) == trt.TensorIOMode.OUTPUT
+            (self.outputs if is_out else self.inputs)[n] = buf
+            self.context.set_tensor_address(n, buf.data_ptr())
 
     def __call__(self, **inputs: torch.Tensor) -> torch.Tensor:
-        keep = []
         for name, t in inputs.items():
-            t = t.float().contiguous()
-            keep.append(t)
-            self.context.set_tensor_address(name, t.data_ptr())
+            self.inputs[name].copy_(t)
         self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
         return next(iter(self.outputs.values()))
 
