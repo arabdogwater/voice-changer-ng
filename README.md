@@ -68,10 +68,22 @@ Linux: `./start_ng.sh` (same arguments).
 
 | Flag | Default | |
 |---|---|---|
-| `--tensorrt true` | off | TensorRT fp16 decoder. Install with `uv sync --extra tensorrt`. The first use of each model + chunk size builds an engine in the background (about 1–4 min, audio keeps running on the PyTorch path, expect a little extra GPU load meanwhile); it is cached in `server/engine_cache/`. |
+| `--tensorrt true` | off | TensorRT fp16 decoder. Install with `uv sync --extra tensorrt`, then pre-build the engines for the voices and chunk size you use (below). Missing engines are built in the background on first use while audio keeps running on the PyTorch path, but that competes with the voice changer for the GPU for several minutes. |
 | `--vad true` | off | Silero VAD gate. Opens on speech, closes ~400 ms after it; the first ~40 ms of a phrase can be gated, tune with the `vadThreshold` setting (0.4). |
 | `--launch_client` | `browser` | `browser`, `native` (legacy Electron client, if present) or `none`. |
 | `--download_all_weights true` | off | pre-fetch every weight (crepe, whisper, DDSP/Diffusion vocoders…) at boot. |
+
+### TensorRT engines
+
+Engines are specific to a voice model and to the chunk / crossfade / extra values set in the UI. Build them once with nothing else using the GPU (~3 min each), and they are cached in `server/engine_cache/`:
+
+```bash
+uv sync --extra tensorrt
+```
+
+```bash
+cd server && uv run --no-sync python tools/build_trt_engines.py --model_dir model_dir --slots 0,3 --chunks 2048 --crossfade 4096 --extra 16384
+```
 
 ### Recommended settings
 

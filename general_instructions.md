@@ -47,7 +47,8 @@ GPU-native extractors (`gpu_native = True`: RMVPE, FCPE) take/return tensors; CP
 # Acceleration
 
 ## TensorRT decoder
-Opt-in `--tensorrt true` (needs `uv sync --extra tensorrt`). `inferencer/trt_decoder.py`: `DecoderCore` = NSF decoder without the random source; ONNX export + fp16 engine at builder optimisation level 2, built in a background thread on first use of (model, decoder shape, convert_length), cached in `server/engine_cache/`. `TrtDecoderCache.generation` is part of the graph key, so the pipeline re-captures once an engine lands. Builds never start inside a capture. Decoder 4.15 → 1.75 ms (RTX 3070).
+Opt-in `--tensorrt true` (needs `uv sync --extra tensorrt`). `inferencer/trt_decoder.py`: `DecoderCore` = NSF decoder without the random source; ONNX export + fp16 engine at builder optimisation level 2, built in a background thread on first use of (model, decoder shape, convert_length), cached in `server/engine_cache/`. `TrtDecoderCache.generation` is part of the graph key, so the pipeline re-captures once an engine lands. Builds never start inside a capture. Decoder 4.15 → 1.75 ms (RTX 3070); whole chunk 10.9 → 9.4 ms.
+Engines depend on (model, chunk, crossfade, extra rounding). Building while audio runs competes for the GPU (took >5 min and raised latency to ~25 ms p50 in testing), so pre-build offline: `server/tools/build_trt_engines.py --slots 0 --chunks 2048 --crossfade <UI value> --extra <UI value>` (~3 min per engine, nothing else on the GPU).
 
 # Runtime
 
