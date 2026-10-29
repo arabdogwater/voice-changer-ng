@@ -22,6 +22,9 @@ def cell(r, chunk_ms):
 
 
 def main():
+    import sys
+
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles default to cp1252
     ap = argparse.ArgumentParser()
     ap.add_argument("--old", default="old_rmvpe")
     ap.add_argument("--new", default="final_rmvpe")
