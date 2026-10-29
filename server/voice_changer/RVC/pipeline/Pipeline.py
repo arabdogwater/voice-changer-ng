@@ -1,9 +1,7 @@
-import numpy as np
-from typing import Any
 import math
+
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
 from Exceptions import (
     DeviceCannotSupportHalfPrecisionException,
     DeviceChangingException,
@@ -16,21 +14,23 @@ from voice_changer.RVC.embedder.Embedder import Embedder
 from voice_changer.RVC.inferencer.Inferencer import Inferencer
 from voice_changer.RVC.inferencer.OnnxRVCInferencer import OnnxRVCInferencer
 from voice_changer.RVC.inferencer.OnnxRVCInferencerNono import OnnxRVCInferencerNono
+from voice_changer.RVC.pipeline.cuda_graph import GraphCache
+from voice_changer.RVC.pipeline.gpu_index import GpuIndex
 
-from voice_changer.RVC.pitchExtractor.PitchExtractor import PitchExtractor
-from voice_changer.utils.Timer import Timer2
+from voice_changer.RVC.pitchExtractor.PitchExtractor import PitchExtractor, legacy_extract
 
 logger = VoiceChangaerLogger.get_instance().getLogger()
 
 
 class Pipeline(object):
+    """RVC pipeline. Every tensor stays on `device` from input to output; the per-chunk GPU work
+    is replayed as a single CUDA graph when possible."""
+
     embedder: Embedder
     inferencer: Inferencer
     pitchExtractor: PitchExtractor
 
-    index: Any | None
-    big_npy: Any | None
-    # feature: Any | None
+    index: GpuIndex | None
 
     targetSR: int
     device: torch.device
@@ -41,8 +41,7 @@ class Pipeline(object):
         embedder: Embedder,
         inferencer: Inferencer,
         pitchExtractor: PitchExtractor,
-        index: Any | None,
-        # feature: Any | None,
+        index: GpuIndex | None,
         targetSR,
         device,
         isHalf,
@@ -55,8 +54,6 @@ class Pipeline(object):
         logger.info("GENERATE PITCH EXTRACTOR" + str(self.pitchExtractor))
 
         self.index = index
-        self.big_npy = index.reconstruct_n(0, index.ntotal) if index is not None else None
-        # self.feature = feature
 
         self.targetSR = targetSR
         self.device = device
@@ -64,63 +61,56 @@ class Pipeline(object):
 
         self.sr = 16000
         self.window = 160
+        self.featDtype = torch.float16 if isHalf else torch.float32
+        self.use_cuda_graphs = True
+        self.graphs = GraphCache()
 
     def getPipelineInfo(self):
         inferencerInfo = self.inferencer.getInferencerInfo() if self.inferencer else {}
         embedderInfo = self.embedder.getEmbedderInfo()
         pitchExtractorInfo = self.pitchExtractor.getPitchExtractorInfo()
-        return {"inferencer": inferencerInfo, "embedder": embedderInfo, "pitchExtractor": pitchExtractorInfo, "isHalf": self.isHalf}
+        return {
+            "inferencer": inferencerInfo,
+            "embedder": embedderInfo,
+            "pitchExtractor": pitchExtractorInfo,
+            "isHalf": self.isHalf,
+            "index": "gpu-exact" if self.index is not None else "none",
+            "cudaGraphs": self.graphable(),
+        }
 
     def setPitchExtractor(self, pitchExtractor: PitchExtractor):
         self.pitchExtractor = pitchExtractor
+        self.graphs.clear()
+        self.graphs.disabled = False
 
     def extractPitch(self, audio_pad, if_f0, pitchf, f0_up_key, silence_front):
+        if if_f0 != 1:
+            return None, None
         try:
-            if if_f0 == 1:
-                pitch, pitchf = self.pitchExtractor.extract(
-                    audio_pad,
-                    pitchf,
-                    f0_up_key,
-                    self.sr,
-                    self.window,
-                    silence_front=silence_front,
-                )
-                # pitch = pitch[:p_len]
-                # pitchf = pitchf[:p_len]
-                pitch = torch.tensor(pitch, device=self.device).unsqueeze(0).long()
-                pitchf = torch.tensor(pitchf, device=self.device, dtype=torch.float).unsqueeze(0)
+            if getattr(self.pitchExtractor, "gpu_native", False):
+                pitch, pitchf = self.pitchExtractor.extract(audio_pad, pitchf, f0_up_key, self.sr, self.window, silence_front=silence_front)
             else:
-                pitch = None
-                pitchf = None
+                key = float(f0_up_key) if torch.is_tensor(f0_up_key) else f0_up_key
+                pitch, pitchf = legacy_extract(self.pitchExtractor, audio_pad, pitchf, key, self.sr, self.window, silence_front)
         except IndexError as e:  # NOQA
-            print(e)
-            import traceback
-            traceback.print_exc()
+            logger.exception(e)
             raise NotEnoughDataExtimateF0()
-        return pitch, pitchf
+        return pitch.unsqueeze(0), pitchf.unsqueeze(0).float()
 
     def extractFeatures(self, feats, embOutputLayer, useFinalProj):
-        with autocast(enabled=self.isHalf):
-            try:
-                feats = self.embedder.extractFeatures(feats, embOutputLayer, useFinalProj)
-                if torch.isnan(feats).all():
-                    raise DeviceCannotSupportHalfPrecisionException()
-                return feats
-            except RuntimeError as e:
-                if "HALF" in e.__str__().upper():
-                    raise HalfPrecisionChangingException()
-                elif "same device" in e.__str__():
-                    raise DeviceChangingException()
-                else:
-                    raise e
-                
+        try:
+            return self.embedder.extractFeatures(feats, embOutputLayer, useFinalProj)
+        except RuntimeError as e:
+            if "HALF" in e.__str__().upper():
+                raise HalfPrecisionChangingException()
+            elif "same device" in e.__str__():
+                raise DeviceChangingException()
+            else:
+                raise e
+
     def infer(self, feats, p_len, pitch, pitchf, sid, out_size):
         try:
-            with torch.no_grad():
-                with autocast(enabled=self.isHalf):
-                    audio1 = self.inferencer.infer(feats,  p_len, pitch, pitchf, sid, out_size)                    
-                    audio1 = (audio1 * 32767.5).data.to(dtype=torch.int16)
-            return audio1
+            return self.inferencer.infer(feats, p_len, pitch, pitchf, sid, out_size)
         except RuntimeError as e:
             if "HALF" in e.__str__().upper():
                 print("HalfPresicion Error:", e)
@@ -128,12 +118,22 @@ class Pipeline(object):
             else:
                 raise e
 
+    def graphable(self) -> bool:
+        return (
+            self.use_cuda_graphs
+            and not self.graphs.disabled
+            and self.device.type == "cuda"
+            and getattr(self.pitchExtractor, "gpu_native", False)
+            and type(self.inferencer) not in [OnnxRVCInferencer, OnnxRVCInferencerNono]
+        )
+
+    @torch.inference_mode()
     def exec(
         self,
         sid,
-        audio,  # torch.tensor [n]
-        pitchf,  # np.array [m]
-        feature,  # np.array [m, feat]
+        audio,  # torch.Tensor [n] @16k on device
+        pitchf,  # torch.Tensor [m] on device, or None for models without f0
+        feature,  # torch.Tensor [m, C] on device
         f0_up_key,
         index_rate,
         if_f0,
@@ -144,137 +144,95 @@ class Pipeline(object):
         protect=0.5,
         out_size=None,
     ):
-        # print(f"pipeline exec input, audio:{audio.shape}, pitchf:{pitchf.shape}, feature:{feature.shape}")
-        # print(f"pipeline exec input, silence_front:{silence_front}, out_size:{out_size}")
+        # host-side planning: everything that decides shapes or branches is resolved here
+        quality_padding_sec = (repeat * (audio.shape[0] - 1)) / self.sr  # reflect padding must be shorter than the input
+        t_pad = round(self.sr * quality_padding_sec)
+        t_pad_tgt = round(self.targetSR * quality_padding_sec)
+        silence_front = silence_front if repeat == 0 else 0  # RVC Quality on: no history reuse
+        out_size = out_size if repeat == 0 else None
+        has_f0 = if_f0 == 1 and pitchf is not None
+        if has_f0 and repeat != 0:
+            pitchf = torch.zeros((audio.shape[0] + 2 * t_pad) // self.window, device=self.device)
+        if not has_f0:
+            pitchf = torch.zeros(1, device=self.device)
+        search_index = self.index is not None and index_rate != 0
+        use_protect = protect < 0.5 and search_index and has_f0
+        feature = feature.to(self.featDtype)
+        # values the user drags around stay tensors, so moving a slider never forces a re-capture
+        knobs = torch.tensor([sid, f0_up_key, index_rate, protect], dtype=torch.float32).to(self.device, non_blocking=True)
 
-        with Timer2("Pipeline-Exec", False) as t:  # NOQA
-            # 16000のサンプリングレートで入ってきている。以降この世界は16000で処理。
-            search_index = self.index is not None and self.big_npy is not None and index_rate != 0
-            # self.t_pad = self.sr * repeat  # 1秒
-            # self.t_pad_tgt = self.targetSR * repeat  # 1秒　出力時のトリミング(モデルのサンプリングで出力される)
-            audio = audio.unsqueeze(0)
+        plan = (audio.shape[0], pitchf.shape[0], tuple(feature.shape), has_f0, silence_front, int(embOutputLayer), bool(useFinalProj), t_pad, t_pad_tgt, out_size, search_index, use_protect)
 
-            quality_padding_sec = (repeat * (audio.shape[1] - 1)) / self.sr  # padding(reflect)のサイズは元のサイズより小さい必要がある。
+        def core(audio, pitchf, feature, knobs):
+            return self._core(audio, pitchf, feature, knobs, plan)
 
-            self.t_pad = round(self.sr * quality_padding_sec)  # 前後に音声を追加
-            self.t_pad_tgt = round(self.targetSR * quality_padding_sec)  # 前後に音声を追加　出力時のトリミング(モデルのサンプリングで出力される)
-            audio_pad = F.pad(audio, (self.t_pad, self.t_pad), mode="reflect").squeeze(0)
-            p_len = audio_pad.shape[0] // self.window
-            sid = torch.tensor(sid, device=self.device).unsqueeze(0).long()
+        if self.graphable():
+            try:
+                audio1, pitchf_out, feats_out = self.graphs.run(plan, core, [audio, pitchf, feature, knobs])
+            except Exception as e:  # anything not capturable: run this pipeline eagerly from now on
+                logger.warning(f"[Voice Changer] CUDA graph capture failed, running eagerly: {e}")
+                self.graphs.disabled = True
+                self.graphs.clear()
+                torch.cuda.synchronize()
+                audio1, pitchf_out, feats_out = core(audio, pitchf, feature, knobs)
+        else:
+            audio1, pitchf_out, feats_out = core(audio, pitchf, feature, knobs)
+            if torch.isnan(feats_out).all():
+                raise DeviceCannotSupportHalfPrecisionException()
+        return audio1, (pitchf_out if has_f0 else None), feats_out
 
-            # RVC QualityがOnのときにはsilence_frontをオフに。
-            silence_front = silence_front if repeat == 0 else 0
-            pitchf = pitchf if repeat == 0 else np.zeros(p_len)
-            out_size = out_size if repeat == 0 else None
+    def _core(self, audio, pitchf, feature, knobs, plan):
+        """GPU work for one chunk: fixed shapes and no host syncs, so it can be captured as a CUDA graph."""
+        _, _, _, has_f0, silence_front, embOutputLayer, useFinalProj, t_pad, t_pad_tgt, out_size, search_index, use_protect = plan
+        sid = knobs[0:1].long()
+        f0_up_key, index_rate, protect = knobs[1], knobs[2], knobs[3]
 
-            # tensor型調整
-            feats = audio_pad
-            if feats.dim() == 2:  # double channels
-                feats = feats.mean(-1)
-            assert feats.dim() == 1, feats.dim()
-            feats = feats.view(1, -1)
+        audio_pad = F.pad(audio.unsqueeze(0), (t_pad, t_pad), mode="reflect").squeeze(0) if t_pad > 0 else audio
+        p_len = audio_pad.shape[0] // self.window
 
-            t.record("pre-process")
-            # ピッチ検出
-            pitch, pitchf = self.extractPitch(audio_pad, if_f0, pitchf, f0_up_key, silence_front)
-            t.record("extract-pitch")
+        pitch, pitchf = self.extractPitch(audio_pad, 1 if has_f0 else 0, pitchf, f0_up_key, silence_front)
+        feats = self.extractFeatures(audio_pad.view(1, -1), embOutputLayer, useFinalProj)
 
-            # embedding
-            feats = self.extractFeatures(feats, embOutputLayer, useFinalProj)
-            t.record("extract-feats")
+        if search_index:
+            # the history part (silence_front) keeps last chunk's retrieved features
+            offset = min(math.floor(silence_front * 16000) // 320, feats.shape[1])  # 320 samples per frame
+            retrieved = self.index.search(feats[0, offset:]).to(feats.dtype)
+            hist = feature[: offset * 2 : 2].to(feats.dtype) if offset > 0 else feats[0, :0]
+            pad = feats.shape[1] - hist.shape[0] - retrieved.shape[0]
+            parts = [feats[0, :pad]] if pad > 0 else []
+            npy = torch.cat(parts + [hist, retrieved])[-feats.shape[1]:]
+            rate = index_rate.to(feats.dtype)
+            feats = npy.unsqueeze(0) * rate + (1 - rate) * feats
+        feats = F.interpolate(feats.permute(0, 2, 1), scale_factor=2).permute(0, 2, 1)
+        if use_protect:
+            feats0 = feats.clone()
 
-            # Index - feature抽出
-            # if self.index is not None and self.feature is not None and index_rate != 0:
-            if search_index:
-                npy = feats[0].cpu().numpy()
-                # apply silent front for indexsearch
-                npyOffset = math.floor(silence_front * 16000) // 360
-                npy = npy[npyOffset:]
+        if feats.shape[1] < p_len:
+            p_len = feats.shape[1]
+            if pitch is not None:
+                pitch, pitchf = pitch[:, :p_len], pitchf[:, :p_len]
+        feats_len = feats.shape[1]
+        if pitch is not None:
+            pitch, pitchf = pitch[:, -feats_len:], pitchf[:, -feats_len:]
 
-                if self.isHalf is True:
-                    npy = npy.astype("float32")
+        # where f0 is unvoiced, mix back the un-retrieved features (upstream behaviour)
+        if use_protect:
+            pitchff = torch.where(pitchf > 0, torch.ones_like(pitchf), protect.expand_as(pitchf)).unsqueeze(-1)
+            feats = (feats * pitchff + feats0 * (1 - pitchff)).to(feats0.dtype)
 
-                # TODO: kは調整できるようにする
-                k = 1
-                if k == 1:
-                    _, ix = self.index.search(npy, 1)
-                    npy = self.big_npy[ix.squeeze()]
-                else:
-                    score, ix = self.index.search(npy, k=8)
-                    weight = np.square(1 / score)
-                    weight /= weight.sum(axis=1, keepdims=True)
-                    npy = np.sum(self.big_npy[ix] * np.expand_dims(weight, axis=2), axis=1)
-
-                # recover silient font
-                npy = np.concatenate([np.zeros([npyOffset, npy.shape[1]], dtype=np.float32), feature[:npyOffset:2].astype("float32"), npy])[-feats.shape[1]:]
-                feats = torch.from_numpy(npy).unsqueeze(0).to(self.device) * index_rate + (1 - index_rate) * feats
-            feats = F.interpolate(feats.permute(0, 2, 1), scale_factor=2).permute(0, 2, 1)
-            if protect < 0.5 and search_index:
-                feats0 = feats.clone()
-
-            # ピッチサイズ調整
-            p_len = audio_pad.shape[0] // self.window
-            if feats.shape[1] < p_len:
-                p_len = feats.shape[1]
-                if pitch is not None and pitchf is not None:
-                    pitch = pitch[:, :p_len]
-                    pitchf = pitchf[:, :p_len]
-
+        if type(self.inferencer) in [OnnxRVCInferencer, OnnxRVCInferencerNono]:
+            npyOffset = math.floor(silence_front * 16000) // 360
+            feats = feats[:, npyOffset * 2 :, :]  # NOQA
             feats_len = feats.shape[1]
-            if pitch is not None and pitchf is not None:
-                pitch = pitch[:, -feats_len:]
-                pitchf = pitchf[:, -feats_len:]
-            p_len = torch.tensor([feats_len], device=self.device).long()
+            if pitch is not None:
+                pitch, pitchf = pitch[:, -feats_len:], pitchf[:, -feats_len:]
+        p_len = torch.full((1,), feats_len, device=self.device, dtype=torch.long)
 
-            # pitchの推定が上手くいかない(pitchf=0)場合、検索前の特徴を混ぜる
-            # pitchffの作り方の疑問はあるが、本家通りなので、このまま使うことにする。
-            # https://github.com/w-okada/voice-changer/pull/276#issuecomment-1571336929
-            if protect < 0.5 and search_index:
-                pitchff = pitchf.clone()
-                pitchff[pitchf > 0] = 1
-                pitchff[pitchf < 1] = protect
-                pitchff = pitchff.unsqueeze(-1)
-                feats = feats * pitchff + feats0 * (1 - pitchff)
-                feats = feats.to(feats0.dtype)
-            p_len = torch.tensor([p_len], device=self.device).long()
-
-            # apply silent front for inference
-            if type(self.inferencer) in [OnnxRVCInferencer, OnnxRVCInferencerNono]:
-                npyOffset = math.floor(silence_front * 16000) // 360
-                feats = feats[:, npyOffset * 2 :, :]  # NOQA
-
-            feats_len = feats.shape[1]
-            if pitch is not None and pitchf is not None:
-                pitch = pitch[:, -feats_len:]
-                pitchf = pitchf[:, -feats_len:]
-            p_len = torch.tensor([feats_len], device=self.device).long()
-
-            t.record("mid-precess")
-            # 推論実行
-            audio1 = self.infer(feats, p_len, pitch, pitchf, sid, out_size)
-            t.record("infer")
-
-            feats_buffer = feats.squeeze(0).detach().cpu()
-            if pitchf is not None:
-                pitchf_buffer = pitchf.squeeze(0).detach().cpu()
-            else:
-                pitchf_buffer = None
-
-            del p_len, pitch, pitchf, feats
-            # torch.cuda.empty_cache()
-
-            # inferで出力されるサンプリングレートはモデルのサンプリングレートになる。
-            # pipelineに（入力されるときはhubertように16k）
-            if self.t_pad_tgt != 0:
-                offset = self.t_pad_tgt
-                end = -1 * self.t_pad_tgt
-                audio1 = audio1[offset:end]
-
-            del sid
-            t.record("post-process")
-            # torch.cuda.empty_cache()
-        # print("EXEC AVERAGE:", t.avrSecs)
-        return audio1, pitchf_buffer, feats_buffer
+        audio1 = self.infer(feats, p_len, pitch, pitchf, sid, out_size)
+        if t_pad_tgt != 0:
+            audio1 = audio1[t_pad_tgt:-t_pad_tgt]
+        pitchf_out = pitchf.squeeze(0) if pitchf is not None else torch.zeros(1, device=self.device)
+        return audio1, pitchf_out, feats.squeeze(0)
 
     def __del__(self):
         del self.embedder

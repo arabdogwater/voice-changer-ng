@@ -10,7 +10,6 @@ from voice_changer.Local.AudioDeviceList import checkSamplingRate, list_audio_de
 import time
 import sounddevice as sd
 from voice_changer.utils.Timer import Timer2
-import librosa
 
 from voice_changer.utils.VoiceChangerModel import AudioInOut
 from typing import Protocol
@@ -133,7 +132,7 @@ class ServerDevice:
 
     def _processData(self, indata: np.ndarray):
         indata = indata * self.settings.serverInputAudioGain
-        unpackedData = librosa.to_mono(indata.T) * 32768.0
+        unpackedData = (indata.mean(axis=1) if indata.ndim > 1 else indata) * 32768.0
         unpackedData = unpackedData.astype(np.int16)
         out_wav, times = self.serverDeviceCallbacks.on_request(unpackedData)
         return out_wav, times

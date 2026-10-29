@@ -30,7 +30,7 @@ from Exceptions import (
     PipelineCreateException,
     PipelineNotInitializedException,
 )
-import resampy
+from voice_changer.utils import resample as resampy
 from typing import cast
 
 logger = VoiceChangaerLogger.get_instance().getLogger()

@@ -259,6 +259,8 @@ class VoiceChangerManager(ServerDeviceCallbacks):
             self.voiceChanger = VoiceChangerV2(self.params)
             self.voiceChanger.setModel(self.voiceChangerModel)
 
+        elif slotInfo.voiceChangerType in ("so-vits-svc-40", "DDSP-SVC", "Diffusion-SVC") and not self._legacyWeightsReady():
+            return
         elif slotInfo.voiceChangerType == "MMVCv13":
             logger.info("................MMVCv13")
             from voice_changer.MMVCv13.MMVCv13 import MMVCv13
@@ -385,6 +387,17 @@ class VoiceChangerManager(ServerDeviceCallbacks):
             loadParam = LoadModelParams(voiceChangerType="RVC", slot=slot, isSampleMode=False, sampleId="", files=[LoadModelParamFile(name=os.path.basename(merged), kind="rvcModel", dir="")], params={})
             self.loadModel(loadParam)
         return self.get_info()
+
+    def _legacyWeightsReady(self) -> bool:
+        from downloader.WeightDownloader import LEGACY_MODEL_WEIGHTS, ensureWeights
+        from Exceptions import WeightDownladException
+
+        try:
+            ensureWeights(self.params, LEGACY_MODEL_WEIGHTS)
+            return True
+        except WeightDownladException:
+            logger.error("[Voice Changer] could not download the weights this model type needs")
+            return False
 
     def setEmitTo(self, emitTo: Callable[[Any], None]):
         self.emitToFunc = emitTo

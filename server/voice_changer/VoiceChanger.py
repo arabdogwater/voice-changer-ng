@@ -5,7 +5,7 @@ import torch
 import os
 import numpy as np
 from dataclasses import dataclass, asdict, field
-import resampy
+from voice_changer.utils import resample as resampy
 import onnxruntime
 from mods.log_control import VoiceChangaerLogger
 

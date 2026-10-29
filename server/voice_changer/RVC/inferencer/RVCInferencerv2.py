@@ -1,7 +1,7 @@
 import torch
 from const import EnumInferenceTypes
 from voice_changer.RVC.deviceManager.DeviceManager import DeviceManager
-from voice_changer.RVC.inferencer.Inferencer import Inferencer
+from voice_changer.RVC.inferencer.Inferencer import Inferencer, optimize_for_inference
 from .rvc_models.infer_pack.models import SynthesizerTrnMs768NSFsid
 
 
@@ -17,6 +17,7 @@ class RVCInferencerv2(Inferencer):
 
         model.eval()
         model.load_state_dict(cpt["weight"], strict=False)
+        model = optimize_for_inference(model)
 
         model = model.to(dev)
         if isHalf:

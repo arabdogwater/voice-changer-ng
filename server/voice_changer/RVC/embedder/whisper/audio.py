@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Union
 
 import numpy as np
+from voice_changer.utils.mel import mel
 import torch
 import torch.nn.functional as F
 
@@ -77,7 +78,7 @@ def mel_filters(device, n_mels: int = N_MELS) -> torch.Tensor:
 
         np.savez_compressed(
             "mel_filters.npz",
-            mel_80=librosa.filters.mel(sr=16000, n_fft=400, n_mels=80),
+            mel_80=mel(sr=16000, n_fft=400, n_mels=80),
         )
     """
     assert n_mels == 80, f"Unsupported n_mels: {n_mels}"

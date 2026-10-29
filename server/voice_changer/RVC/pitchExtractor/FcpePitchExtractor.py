@@ -1,44 +1,31 @@
-import numpy as np
+import torch
 from const import PitchExtractorType
 from voice_changer.RVC.deviceManager.DeviceManager import DeviceManager
-from voice_changer.RVC.pitchExtractor.PitchExtractor import PitchExtractor
-import torchfcpe
+from voice_changer.RVC.pitchExtractor.PitchExtractor import PitchExtractor, analysis_window, coarse_pitch, pitch_scale, place_tail
+
+HOP = 160
+
 
 class FcpePitchExtractor(PitchExtractor):
+    gpu_native = True
 
     def __init__(self, gpu: int):
         super().__init__()
+        import torchfcpe
+
         self.pitchExtractorType: PitchExtractorType = "fcpe"
         self.device = DeviceManager.get_instance().getDevice(gpu)
         self.fcpe = torchfcpe.spawn_bundled_infer_model(self.device)
 
-    # I merge the code of Voice-Changer-CrepePitchExtractor and RVC-fcpe-infer, sry I don't know how to optimize the function.
-    def extract(self, audio, pitchf, f0_up_key, sr, window, silence_front=0):
-        start_frame = int(silence_front * sr / window)
-        real_silence_front = start_frame * window / sr
-
-        silence_front_offset = int(np.round(real_silence_front * sr))
-        audio = audio[silence_front_offset:]
-
-        f0_min = 50
-        f0_max = 1100
-        f0_mel_min = 1127 * np.log(1 + f0_min / 700)
-        f0_mel_max = 1127 * np.log(1 + f0_max / 700)
-
+    @torch.inference_mode()
+    def extract(self, audio: torch.Tensor, pitchf: torch.Tensor, f0_up_key, sr, window, silence_front=0):
+        start = analysis_window(audio.shape[0], silence_front, 16000, HOP, context=1600, min_len=8 * HOP)
         f0 = self.fcpe.infer(
-            audio.to(self.device).unsqueeze(0).float(),
+            audio[start:].to(self.device).unsqueeze(0).float(),
             sr=16000,
             decoder_mode="local_argmax",
             threshold=0.006,
-        )
-        f0 = f0.squeeze()
-
-        f0 *= pow(2, f0_up_key / 12)
-        pitchf[-f0.shape[0]:] = f0.detach().cpu().numpy()[:pitchf.shape[0]]
-        f0bak = pitchf.copy()
-        f0_mel = 1127.0 * np.log(1.0 + f0bak / 700.0)
-        f0_mel = np.clip(
-            (f0_mel - f0_mel_min) * 254.0 / (f0_mel_max - f0_mel_min) + 1.0, 1.0, 255.0
-        )
-        pitch_coarse = f0_mel.astype(int)
-        return pitch_coarse, pitchf
+        ).reshape(-1)
+        f0 = f0 * pitch_scale(f0_up_key)
+        pitchf = place_tail(pitchf, f0)
+        return coarse_pitch(pitchf), pitchf

@@ -1,45 +1,26 @@
-import numpy as np
+import torch
 from const import PitchExtractorType
-from voice_changer.DiffusionSVC.pitchExtractor.PitchExtractor import PitchExtractor
 from voice_changer.DiffusionSVC.pitchExtractor.rmvpe.rmvpe import RMVPE
 from voice_changer.RVC.deviceManager.DeviceManager import DeviceManager
+from voice_changer.RVC.pitchExtractor.PitchExtractor import PitchExtractor, analysis_window, coarse_pitch, pitch_scale, place_tail
+
+HOP = 160  # RMVPE is fixed to 16 kHz / 10 ms
 
 
 class RMVPEPitchExtractor(PitchExtractor):
+    gpu_native = True
 
     def __init__(self, file: str, gpu: int):
         super().__init__()
         self.pitchExtractorType: PitchExtractorType = "rmvpe"
-        self.f0_min = 50
-        self.f0_max = 1100
-        self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
-        self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
+        dm = DeviceManager.get_instance()
+        self.device = dm.getDevice(gpu)
+        self.rmvpe = RMVPE(model_path=file, is_half=dm.halfPrecisionAvailable(gpu), device=self.device)
 
-        self.uv_interp = True
-        self.input_sr = -1
-        self.device = DeviceManager.get_instance().getDevice(gpu)
-        self.rmvpe = RMVPE(model_path=file, is_half=False, device=self.device)
-
-    def extract(self, audio, pitchf, f0_up_key, sr, window, silence_front=0):
-        hop_size = 160  # RMVPE固定
-
-        offset_frame_number = silence_front * 16000
-        start_frame = int(offset_frame_number / hop_size)  # frame
-        real_silence_front = start_frame * hop_size / 16000  # 秒
-        audio = audio[int(np.round(real_silence_front * 16000)):]
-
-        f0 = self.rmvpe.infer_from_audio_t(audio, thred=0.03)
-
-        f0 = f0 * 2 ** (float(f0_up_key) / 12)
-        pitchf[-f0.shape[0]:] = f0[:pitchf.shape[0]]
-        f0 = pitchf
-
-        f0bak = f0.copy()
-        f0_mel = 1127 * np.log(1 + f0 / 700)
-        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (
-            self.f0_mel_max - self.f0_mel_min
-        ) + 1
-        f0_mel[f0_mel <= 1] = 1
-        f0_mel[f0_mel > 255] = 255
-        f0_coarse = np.rint(f0_mel).astype(int)
-        return f0_coarse, f0bak
+    def extract(self, audio: torch.Tensor, pitchf: torch.Tensor, f0_up_key, sr, window, silence_front=0):
+        # 100 ms of left context for the U-Net, at least 32 frames for its pooling
+        start = analysis_window(audio.shape[0], silence_front, 16000, HOP, context=1600, min_len=32 * HOP)
+        f0 = self.rmvpe.infer_from_audio_gpu(audio[start:], thred=0.03)
+        f0 = f0 * pitch_scale(f0_up_key)
+        pitchf = place_tail(pitchf, f0[: (audio.shape[0] - start) // HOP + 1])
+        return coarse_pitch(pitchf), pitchf

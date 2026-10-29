@@ -1,6 +1,5 @@
 import os
 import traceback
-import faiss
 from Exceptions import PipelineCreateException
 from data.ModelSlot import RVCModelSlot
 
@@ -8,6 +7,7 @@ from voice_changer.RVC.deviceManager.DeviceManager import DeviceManager
 from voice_changer.RVC.embedder.EmbedderManager import EmbedderManager
 from voice_changer.RVC.inferencer.InferencerManager import InferencerManager
 from voice_changer.RVC.pipeline.Pipeline import Pipeline
+from voice_changer.RVC.pipeline.gpu_index import GpuIndex, load_index_vectors
 from voice_changer.RVC.pitchExtractor.PitchExtractorManager import PitchExtractorManager
 from voice_changer.utils.VoiceChangerParams import VoiceChangerParams
 
@@ -43,7 +43,8 @@ def createPipeline(params: VoiceChangerParams, modelSlot: RVCModelSlot, gpu: int
 
     # index, feature
     indexPath = os.path.join(params.model_dir, str(modelSlot.slotIndex), os.path.basename(modelSlot.indexFile))
-    index = _loadIndex(indexPath)
+    vectors = _loadIndex(indexPath)
+    index = GpuIndex(vectors, dev, half) if vectors is not None else None
 
     pipeline = Pipeline(
         embedder,
@@ -68,10 +69,10 @@ def _loadIndex(indexPath: str):
 
     try:
         print("Try loading...", indexPath)
-        index = faiss.read_index(indexPath)
+        vectors = load_index_vectors(indexPath)
     except: # NOQA
         print("[Voice Changer] load index failed. Use no index.")
         traceback.print_exc()
         return None
 
-    return index
+    return vectors

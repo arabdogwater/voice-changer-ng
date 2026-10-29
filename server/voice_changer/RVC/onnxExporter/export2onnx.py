@@ -1,8 +1,6 @@
 import os
 import json
 import torch
-from onnxsim import simplify
-import onnx
 from const import TMP_DIR, EnumInferenceTypes
 from data.ModelSlot import RVCModelSlot
 from voice_changer.RVC.deviceManager.DeviceManager import DeviceManager
@@ -138,6 +136,12 @@ def _export2onnx(input_model, output_model, output_model_simple, is_half, metada
         output_names=output_names,
     )
 
+    import onnx
+
+    try:
+        from onnxsim import simplify
+    except ImportError:  # onnxsim is optional
+        simplify = lambda m: (m, True)  # NOQA
     model_onnx2 = onnx.load(output_model)
     model_simp, check = simplify(model_onnx2)
     meta = model_simp.metadata_props.add()

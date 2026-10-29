@@ -28,8 +28,7 @@ from Exceptions import (
     PipelineCreateException,
     PipelineNotInitializedException,
 )
-import resampy
-from typing import cast
+import torchaudio
 
 logger = VoiceChangaerLogger.get_instance().getLogger()
 
@@ -106,76 +105,64 @@ class RVCr2(VoiceChangerModel):
     def get_processing_sampling_rate(self):
         return self.slotInfo.samplingRate
 
+    def _resampler(self, orig: int, new: int, device: torch.device):
+        key = (orig, new, str(device))
+        cache = self.__dict__.setdefault("_resamplers", {})
+        if key not in cache:
+            cache[key] = torchaudio.transforms.Resample(orig, new).to(device)
+        return cache[key]
+
+    def _resample(self, x: torch.Tensor, orig: int, new: int) -> torch.Tensor:
+        if orig == new:
+            return x
+        return self._resampler(orig, new, x.device)(x.unsqueeze(0)).squeeze(0)
+
     def generate_input(
         self,
-        newData: AudioInOut,
+        newData: torch.Tensor,
         crossfadeSize: int,
         solaSearchFrame: int,
         extra_frame: int,
     ):
-        # 16k で入ってくる。
+        """Append the new 16 kHz chunk to the GPU ring buffers and return the window to convert."""
+        dev = newData.device
         inputSize = newData.shape[0]
-        newData = newData.astype(np.float32) / 32768.0
         newFeatureLength = inputSize // 160  # hopsize:=160
+        emb = self.slotInfo.embChannels
 
-        if self.audio_buffer is not None:
-            # 過去のデータに連結
-            self.audio_buffer = np.concatenate([self.audio_buffer, newData], 0)
+        if self.audio_buffer is not None and self.audio_buffer.device == dev:
+            self.audio_buffer = torch.cat([self.audio_buffer, newData])
             if self.slotInfo.f0:
-                self.pitchf_buffer = np.concatenate([self.pitchf_buffer, np.zeros(newFeatureLength)], 0)
-            self.feature_buffer = np.concatenate(
-                [
-                    self.feature_buffer,
-                    np.zeros([newFeatureLength, self.slotInfo.embChannels]),
-                ],
-                0,
-            )
+                self.pitchf_buffer = torch.cat([self.pitchf_buffer, torch.zeros(newFeatureLength, device=dev)])
+            self.feature_buffer = torch.cat([self.feature_buffer, torch.zeros(newFeatureLength, emb, device=dev, dtype=self.feature_buffer.dtype)])
         else:
             self.audio_buffer = newData
-            if self.slotInfo.f0:
-                self.pitchf_buffer = np.zeros(newFeatureLength)
-            self.feature_buffer = np.zeros([newFeatureLength, self.slotInfo.embChannels])
+            self.pitchf_buffer = torch.zeros(newFeatureLength, device=dev) if self.slotInfo.f0 else None
+            self.feature_buffer = torch.zeros(newFeatureLength, emb, device=dev)
 
         convertSize = inputSize + crossfadeSize + solaSearchFrame + extra_frame
-
-        if convertSize % 160 != 0:  # モデルの出力のホップサイズで切り捨てが発生するので補う。
+        if convertSize % 160 != 0:  # the model output is cut at the hop size, so round up
             convertSize = convertSize + (160 - (convertSize % 160))
         outSize = int(((convertSize - extra_frame) / 16000) * self.slotInfo.samplingRate)
 
-        # バッファがたまっていない場合はzeroで補う
+        # not enough history yet: pad with zeros
         if self.audio_buffer.shape[0] < convertSize:
-            self.audio_buffer = np.concatenate([np.zeros([convertSize]), self.audio_buffer])
+            self.audio_buffer = torch.cat([torch.zeros(convertSize, device=dev), self.audio_buffer])
             if self.slotInfo.f0:
-                self.pitchf_buffer = np.concatenate([np.zeros([convertSize // 160]), self.pitchf_buffer])
-            self.feature_buffer = np.concatenate(
-                [
-                    np.zeros([convertSize // 160, self.slotInfo.embChannels]),
-                    self.feature_buffer,
-                ]
-            )
+                self.pitchf_buffer = torch.cat([torch.zeros(convertSize // 160, device=dev), self.pitchf_buffer])
+            self.feature_buffer = torch.cat([torch.zeros(convertSize // 160, emb, device=dev, dtype=self.feature_buffer.dtype), self.feature_buffer])
 
-        # 不要部分をトリミング
-        convertOffset = -1 * convertSize
-        featureOffset = convertOffset // 160
-        self.audio_buffer = self.audio_buffer[convertOffset:]  # 変換対象の部分だけ抽出
+        featureOffset = -convertSize // 160
+        self.audio_buffer = self.audio_buffer[-convertSize:]
         if self.slotInfo.f0:
             self.pitchf_buffer = self.pitchf_buffer[featureOffset:]
         self.feature_buffer = self.feature_buffer[featureOffset:]
-
-        # 出力部分だけ切り出して音量を確認。(TODO:段階的消音にする)
-        cropOffset = -1 * (inputSize + crossfadeSize)
-        cropEnd = -1 * (crossfadeSize)
-        crop = self.audio_buffer[cropOffset:cropEnd]
-        vol = np.sqrt(np.square(crop).mean())
-        vol = max(vol, self.prevVol * 0.0)
-        self.prevVol = vol
 
         return (
             self.audio_buffer,
             self.pitchf_buffer,
             self.feature_buffer,
             convertSize,
-            vol,
             outSize,
         )
 
@@ -184,82 +171,49 @@ class RVCr2(VoiceChangerModel):
             logger.info("[Voice Changer] Pipeline is not initialized.")
             raise PipelineNotInitializedException()
 
-        # 処理は16Kで実施(Pitch, embed, (infer))
-        receivedData = cast(
-            AudioInOut,
-            resampy.resample(
-                receivedData,
-                self.inputSampleRate,
-                16000,
-                filter="kaiser_fast",
-            ),
-        )
+        device = self.pipeline.device
+        chunk = receivedData.astype(np.float32) / 32768.0
+        # silence gate on the host copy: no GPU sync needed to decide
+        vol = float(np.sqrt(np.square(chunk).mean())) if chunk.size else 0.0
+
+        # everything below runs at 16 kHz on the GPU (pitch, embedder, index), the model decodes at its own rate
+        audio16 = self._resample(torch.from_numpy(chunk).to(device, non_blocking=True), self.inputSampleRate, 16000)
         crossfade_frame = int((crossfade_frame / self.inputSampleRate) * 16000)
         sola_search_frame = int((sola_search_frame / self.inputSampleRate) * 16000)
         extra_frame = int((self.settings.extraConvertSize / self.inputSampleRate) * 16000)
 
-        # 入力データ生成
-        data = self.generate_input(receivedData, crossfade_frame, sola_search_frame, extra_frame)
-
-        audio = data[0]
-        pitchf = data[1]
-        feature = data[2]
-        convertSize = data[3]
-        vol = data[4]
-        outSize = data[5]
+        audio, pitchf, feature, convertSize, outSize = self.generate_input(audio16, crossfade_frame, sola_search_frame, extra_frame)
 
         if vol < self.settings.silentThreshold:
             return np.zeros(convertSize).astype(np.int16) * np.sqrt(vol)
 
-        device = self.pipeline.device
-
-        audio = torch.from_numpy(audio).to(device=device, dtype=torch.float32)
         repeat = 1 if self.settings.rvcQuality else 0
-        sid = self.settings.dstId
-        f0_up_key = self.settings.tran
-        index_rate = self.settings.indexRatio
-        protect = self.settings.protect
-
         if_f0 = 1 if self.slotInfo.f0 else 0
-        embOutputLayer = self.slotInfo.embOutputLayer
-        useFinalProj = self.slotInfo.useFinalProj
 
         try:
             audio_out, self.pitchf_buffer, self.feature_buffer = self.pipeline.exec(
-                sid,
+                self.settings.dstId,
                 audio,
                 pitchf,
                 feature,
-                f0_up_key,
-                index_rate,
+                self.settings.tran,
+                self.settings.indexRatio,
                 if_f0,
-                # 0,
-                self.settings.extraConvertSize / self.inputSampleRate if self.settings.silenceFront else 0.0,  # extaraDataSizeの秒数。入力のサンプリングレートで算出
-                embOutputLayer,
-                useFinalProj,
+                self.settings.extraConvertSize / self.inputSampleRate if self.settings.silenceFront else 0.0,  # history length in seconds
+                self.slotInfo.embOutputLayer,
+                self.slotInfo.useFinalProj,
                 repeat,
-                protect,
+                self.settings.protect,
                 outSize,
             )
-            # result = audio_out.detach().cpu().numpy() * np.sqrt(vol)
-            result = audio_out[-outSize:].detach().cpu().numpy() * np.sqrt(vol)
-
-            result = cast(
-                AudioInOut,
-                resampy.resample(
-                    result,
-                    self.slotInfo.samplingRate,
-                    self.outputSampleRate,
-                    filter="kaiser_fast",
-                ),
-            )
-
-            return result
+            # keep upstream's loudness behaviour: int16 scale times sqrt(input rms)
+            out = audio_out[-outSize:].float() * (32767.5 * np.sqrt(vol))
+            out = self._resample(out, self.slotInfo.samplingRate, self.outputSampleRate)
+            return out.cpu().numpy()
         except DeviceCannotSupportHalfPrecisionException as e:  # NOQA
             logger.warn("[Device Manager] Device cannot support half precision. Fallback to float....")
             self.deviceManager.setForceTensor(True)
             self.initialize()
-            # raise e
 
         return
 

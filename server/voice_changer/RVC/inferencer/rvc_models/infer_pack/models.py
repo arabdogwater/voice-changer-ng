@@ -6,6 +6,7 @@ from .modules import ResidualCouplingLayer, Flip, WN, ResBlock1, ResBlock2, LREL
 from .attentions import Encoder
 from .commons import init_weights, get_padding, sequence_mask, rand_slice_segments, slice_segments2
 from torch.nn import Conv1d, ConvTranspose1d, Conv2d
+from .fast_infer import branch_context, infer_cropped
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 import numpy as np
 
@@ -235,18 +236,14 @@ class Generator(torch.nn.Module):
 
         # Compute the minimum size required for estimating real-time speech conversion.
         self.realtime = False
-        if resblock != "1":
+        if True:  # resblock is a class here; upstream compared it to "1" (always true)
             self.realtime = True
             self.ups_size = [0 for _ in range(len(self.ups))]
             # conv_post
             self.ups_size[-1] += 3
 
             for i in range(len(self.ups)-1, -1, -1):                
-                for k, d in zip(resblock_kernel_sizes[::-1], resblock_dilation_sizes[::-1]):
-                    # conv2
-                    self.ups_size[i] += (k - 1)//2
-                    # conv1
-                    self.ups_size[i] += d[-1] * (k - 1)//2
+                self.ups_size[i] += max(branch_context(k, d, resblock is ResBlock1) for k, d in zip(resblock_kernel_sizes, resblock_dilation_sizes))
                 # upsampling
                 self.ups_size[i] = -(-self.ups_size[i] // upsample_rates[i]) + (upsample_kernel_sizes[i] - upsample_rates[i]) // 2
                 if i:
@@ -505,7 +502,7 @@ class GeneratorNSF(torch.nn.Module):
 
         # Compute the minimum size required for estimating real-time speech conversion.
         self.realtime = False
-        if resblock != "1":
+        if True:  # resblock is a class here; upstream compared it to "1" (always true)
             self.realtime = True
             self.ups_size = [0 for _ in range(len(self.ups))]
             self.noise_conv_size = [0 for _ in range(len(self.ups))]
@@ -513,11 +510,7 @@ class GeneratorNSF(torch.nn.Module):
             self.ups_size[-1] += 3
 
             for i in range(len(self.ups)-1, -1, -1):                
-                for k, d in zip(resblock_kernel_sizes[::-1], resblock_dilation_sizes[::-1]):
-                    # conv2
-                    self.ups_size[i] += (k - 1)//2
-                    # conv1
-                    self.ups_size[i] += d[-1] * (k - 1)//2
+                self.ups_size[i] += max(branch_context(k, d, resblock is ResBlock1) for k, d in zip(resblock_kernel_sizes, resblock_dilation_sizes))
                 # noise_conv
                 self.noise_conv_size[i] = self.ups_size[i] * np.prod(upsample_rates[i:])
                 # upsampling
@@ -677,12 +670,7 @@ class SynthesizerTrnMs256NSFsid(nn.Module):
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
     def infer(self, phone, phone_lengths, pitch, nsff0, sid, max_len=None, convert_length=None):
-        g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec.infer_realtime((z * x_mask)[:, :, :max_len], nsff0, g=g, convert_length=convert_length)
-        return o, x_mask, (z, z_p, m_p, logs_p)
+        return infer_cropped(self, phone, phone_lengths, pitch, nsff0, sid, convert_length)
 
 
 class SynthesizerTrnMs768NSFsid(nn.Module):
@@ -761,12 +749,7 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
     def infer(self, phone, phone_lengths, pitch, nsff0, sid, max_len=None, convert_length=None):
-        g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec.infer_realtime((z * x_mask)[:, :, :max_len], nsff0, g=g, convert_length=convert_length)
-        return o, x_mask, (z, z_p, m_p, logs_p)
+        return infer_cropped(self, phone, phone_lengths, pitch, nsff0, sid, convert_length)
 
 
 class SynthesizerTrnMs256NSFsid_nono(nn.Module):
@@ -838,12 +821,7 @@ class SynthesizerTrnMs256NSFsid_nono(nn.Module):
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
     def infer(self, phone, phone_lengths, sid, max_len=None, convert_length=None):
-        g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, None, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec.infer_realtime((z * x_mask)[:, :, :max_len], g=g, convert_length=convert_length)
-        return o, x_mask, (z, z_p, m_p, logs_p)
+        return infer_cropped(self, phone, phone_lengths, None, None, sid, convert_length)
 
 
 class SynthesizerTrnMs768NSFsid_nono(nn.Module):
@@ -915,12 +893,7 @@ class SynthesizerTrnMs768NSFsid_nono(nn.Module):
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
     def infer(self, phone, phone_lengths, sid, max_len=None, convert_length=None):
-        g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, None, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec.infer_realtime((z * x_mask)[:, :, :max_len], g=g, convert_length=convert_length)
-        return o, x_mask, (z, z_p, m_p, logs_p)
+        return infer_cropped(self, phone, phone_lengths, None, None, sid, convert_length)
 
 
 class MultiPeriodDiscriminator(torch.nn.Module):

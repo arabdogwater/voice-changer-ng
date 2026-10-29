@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import numpy as np
-from librosa.filters import mel
+from voice_changer.utils.mel import mel
 
 from mods.log_control import VoiceChangaerLogger
 
@@ -357,9 +357,8 @@ class RMVPE:
     def mel2hidden(self, mel):
         with torch.no_grad():
             n_frames = mel.shape[-1]
-            mel = F.pad(
-                mel, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="reflect"
-            )
+            pad = 32 * ((n_frames - 1) // 32 + 1) - n_frames
+            mel = F.pad(mel, (0, pad), mode="reflect" if pad < n_frames else "replicate")
             hidden = self.model(mel)
             return hidden[:, :n_frames]
 
@@ -398,6 +397,24 @@ class RMVPE:
             hidden = hidden.astype("float32")
         f0 = self.decode(hidden, thred=thred)
         return f0
+
+    @torch.inference_mode()
+    def infer_from_audio_gpu(self, audio: torch.Tensor, thred=0.03) -> torch.Tensor:
+        """1-D 16 kHz tensor on self.device -> f0 tensor [frames] on the same device (no host sync)."""
+        mel = self.mel_extractor(audio.float().unsqueeze(0), center=True)
+        hidden = self.mel2hidden(mel).squeeze(0).float()
+        return self.decode_gpu(hidden, thred)
+
+    def decode_gpu(self, salience: torch.Tensor, thred=0.03) -> torch.Tensor:
+        if getattr(self, "_cents_t", None) is None or self._cents_t.device != salience.device:
+            self._cents_t = torch.from_numpy(self.cents_mapping).float().to(salience.device)
+            self._win = torch.arange(9, device=salience.device)
+        idx = salience.argmax(dim=1, keepdim=True) + self._win  # 9-bin window in the 4-padded salience
+        sal = F.pad(salience, (4, 4)).gather(1, idx)
+        cents = (sal * self._cents_t[idx]).sum(1) / sal.sum(1)
+        cents = torch.where(salience.amax(1) > thred, cents, torch.zeros_like(cents))
+        f0 = 10 * 2 ** (cents / 1200)
+        return torch.where(f0 == 10, torch.zeros_like(f0), f0)
 
     def to_local_average_cents(self, salience, thred=0.05):
         # t0 = ttime()

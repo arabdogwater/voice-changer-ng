@@ -1,6 +1,15 @@
 import sys
 
-from distutils.util import strtobool
+
+
+def strtobool(val: str) -> bool:  # distutils was removed in Python 3.12
+    val = str(val).lower()
+    if val in ("y", "yes", "t", "true", "on", "1"):
+        return True
+    if val in ("n", "no", "f", "false", "off", "0"):
+        return False
+    raise ValueError(f"invalid truth value {val!r}")
+
 from datetime import datetime
 import socket
 import platform
@@ -65,6 +74,7 @@ def setupArgParser():
     parser.add_argument("--rmvpe", type=str, default="pretrain/rmvpe.pt", help="path to rmvpe")
     parser.add_argument("--rmvpe_onnx", type=str, default="pretrain/rmvpe.onnx", help="path to rmvpe onnx")
 
+    parser.add_argument("--download_all_weights", type=strtobool, default=False, help="pre-download every pretrained weight at boot instead of on first use")
     parser.add_argument("--host", type=str, default='127.0.0.1', help="IP address of the network interface to listen for HTTP connections. Specify 0.0.0.0 to listen on all interfaces.")
     parser.add_argument("--allowed-origins", action='append', default=[], help="List of URLs to allow connection from, i.e. https://example.com. Allows http(s)://127.0.0.1:{port} and http(s)://localhost:{port} by default.")
 
@@ -158,7 +168,7 @@ if __name__ == "__main__":
     printMessage("Activating the Voice Changer.", level=2)
     # ダウンロード(Weight)
     try:
-        downloadWeight(voiceChangerParams)
+        downloadWeight(voiceChangerParams, all_weights=args.download_all_weights)
     except WeightDownladException:
         # printMessage("RVC用のモデルファイルのダウンロードに失敗しました。", level=2)
         printMessage("failed to download weight for rvc", level=2)

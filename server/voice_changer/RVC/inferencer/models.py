@@ -7,6 +7,7 @@ from .rvc_models.infer_pack.models import GeneratorNSF, PosteriorEncoder, Residu
 # from infer_pack import commons, attentions
 from .rvc_models.infer_pack.commons import sequence_mask, rand_slice_segments, slice_segments2
 from .rvc_models.infer_pack.attentions import Encoder
+from .rvc_models.infer_pack.fast_infer import infer_cropped
 
 
 class TextEncoder(nn.Module):
@@ -130,12 +131,7 @@ class SynthesizerTrnMsNSFsid(nn.Module):
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
     def infer(self, phone, phone_lengths, pitch, nsff0, sid, max_len=None, convert_length=None):
-        g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec.infer_realtime((z * x_mask)[:, :, :max_len], nsff0, g=g, convert_length=convert_length)
-        return o, x_mask, (z, z_p, m_p, logs_p)
+        return infer_cropped(self, phone, phone_lengths, pitch, nsff0, sid, convert_length)
 
 
 class SynthesizerTrnMsNSFsidNono(nn.Module):
@@ -209,9 +205,4 @@ class SynthesizerTrnMsNSFsidNono(nn.Module):
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
 
     def infer(self, phone, phone_lengths, sid, max_len=None, convert_length=None):
-        g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, None, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec.infer_realtime((z * x_mask)[:, :, :max_len], g=g, convert_length=convert_length)
-        return o, x_mask, (z, z_p, m_p, logs_p)
+        return infer_cropped(self, phone, phone_lengths, None, None, sid, convert_length)

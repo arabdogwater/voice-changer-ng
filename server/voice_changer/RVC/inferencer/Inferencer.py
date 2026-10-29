@@ -45,3 +45,16 @@ class Inferencer(Protocol):
             "isHalf": self.isHalf,
             "gpu": self.gpu,
         }
+
+
+def optimize_for_inference(model: torch.nn.Module) -> torch.nn.Module:
+    """Fold weight norm into plain weights and drop the training-only posterior encoder.
+
+    Upstream kept the weight_norm hooks, so every conv recomputed g * v / ||v|| on every chunk.
+    """
+    for m in model.modules():
+        if hasattr(m, "weight_g") and hasattr(m, "weight_v"):
+            torch.nn.utils.remove_weight_norm(m)
+    if hasattr(model, "enc_q"):
+        del model.enc_q
+    return model

@@ -16,7 +16,8 @@ def download(params):
         os.makedirs(dirname, exist_ok=True)
 
     try:
-        req = requests.get(url, stream=True, allow_redirects=True)
+        req = requests.get(url, stream=True, allow_redirects=True, timeout=60)
+        req.raise_for_status()  # never save an HTTP error page as a model file
         content_length = req.headers.get("content-length")
         progress_bar = tqdm(
             total=int(content_length) if content_length is not None else None,
@@ -28,11 +29,13 @@ def download(params):
         )
 
         # with tqdm
-        with open(saveTo, "wb") as f:
-            for chunk in req.iter_content(chunk_size=1024):
+        tmp = saveTo + ".part"
+        with open(tmp, "wb") as f:
+            for chunk in req.iter_content(chunk_size=1 << 20):
                 if chunk:
                     progress_bar.update(len(chunk))
                     f.write(chunk)
+        os.replace(tmp, saveTo)  # atomic: an interrupted download never looks complete
 
     except Exception as e:
         logger.warning(e)
