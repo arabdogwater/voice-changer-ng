@@ -49,7 +49,8 @@ class GraphCache:
                 fn(*static_in)
         torch.cuda.current_stream().wait_stream(side)
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
+        # thread_local: background work (e.g. TensorRT engine builds) may use the GPU during capture
+        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
             out = fn(*static_in)
         out = out if isinstance(out, tuple) else (out,)
         logger.info(f"[Voice Changer] captured CUDA graph ({len(self.graphs) + 1} cached)")

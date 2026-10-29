@@ -26,6 +26,9 @@ ap.add_argument("--index-ratio", type=float, default=0.0)
 ap.add_argument("--n", type=int, default=60)
 ap.add_argument("--stages", action="store_true", help="time each stage (forces eager mode: syncs are not capturable)")
 ap.add_argument("--no-graphs", action="store_true")
+ap.add_argument("--tensorrt", action="store_true", help="use cached TensorRT decoder engines (build them with server/tools/build_trt_engines.py)")
+ap.add_argument("--no-streams", action="store_true")
+ap.add_argument("--crossfade", type=int, default=1024)
 args = ap.parse_args()
 
 from voice_changer.utils.VoiceChangerParams import VoiceChangerParams  # noqa: E402
@@ -37,8 +40,11 @@ params = VoiceChangerParams(
     model_dir="model_dir", content_vec_500="", content_vec_500_onnx="", content_vec_500_onnx_on=False,
     hubert_base="pretrain/hubert_base.pt", hubert_base_jp="pretrain/rinna_hubert_base_jp.pt", hubert_soft="",
     nsf_hifigan="", sample_mode="", crepe_onnx_full="pretrain/crepe_onnx_full.onnx", crepe_onnx_tiny="pretrain/crepe_onnx_tiny.onnx",
-    rmvpe="pretrain/rmvpe.pt", rmvpe_onnx="pretrain/rmvpe.onnx", whisper_tiny="pretrain/whisper_tiny.pt",
+    rmvpe="pretrain/rmvpe.pt", rmvpe_onnx="pretrain/rmvpe.onnx", whisper_tiny="pretrain/whisper_tiny.pt", tensorrt=args.tensorrt,
 )
+from voice_changer.VoiceChangerParamsManager import VoiceChangerParamsManager  # noqa: E402
+
+VoiceChangerParamsManager.get_instance().setParams(params)
 slot = ModelSlotManager.get_instance("model_dir").get_slot_info(args.slot)
 model = RVCr2(params, slot)
 model.settings.gpu = 0
@@ -49,7 +55,7 @@ model.settings.silentThreshold = 0
 model.initialize()
 vc = VoiceChangerV2(params)
 vc.setModel(model)
-vc.settings.crossFadeOverlapSize = 1024
+vc.settings.crossFadeOverlapSize = args.crossfade
 
 stats = defaultdict(list)
 
@@ -67,6 +73,7 @@ def timed(name, fn):
 
 pl = model.pipeline
 pl.use_cuda_graphs = not (args.no_graphs or args.stages)
+pl.parallel_streams = pl.parallel_streams and not args.no_streams
 if args.stages:
     pl.extractPitch = timed("pitch", pl.extractPitch)
     pl.extractFeatures = timed("embedder", pl.extractFeatures)
@@ -83,11 +90,21 @@ x, sr = sf.read(os.path.join(SERVER, "test.wav"))
 x = x.mean(1) if x.ndim > 1 else x
 x = (soxr.resample(x, sr, 48000) * 32767).astype(np.int16)
 n_chunks = len(x) // args.chunk
-for i in range(args.n + 10):
+trt = getattr(pl.inferencer.model, "trt_decoder", None)
+for i in range(10):  # warm-up; with --tensorrt this also loads the cached engine
+    vc.on_request(x[i * args.chunk:(i + 1) * args.chunk])
+if trt is not None:
+    t0 = time.time()
+    while trt.generation == 0 and not trt.failed and time.time() - t0 < 30:
+        vc.on_request(x[: args.chunk])
+        time.sleep(0.05)
+    print("tensorrt engines loaded:", len(trt.engines), "failed:", len(trt.failed))
+    for i in range(10):
+        vc.on_request(x[i * args.chunk:(i + 1) * args.chunk])
+stats.clear()
+for i in range(args.n):
     c = x[(i % n_chunks) * args.chunk:(i % n_chunks + 1) * args.chunk]
     vc.on_request(c)
-    if i == 9:
-        stats.clear()
 
 print(f"chunk {args.chunk} ({args.chunk / 48:.1f} ms)  extra {args.extra}  f0 {args.f0}  index {args.index_ratio}  cuda graphs {pl.graphable()}")
 for k, v in stats.items():

@@ -17,3 +17,6 @@ class VoiceChangerParams:
     rmvpe: str
     rmvpe_onnx: str
     whisper_tiny: str
+    tensorrt: bool = False  # build TensorRT engines for the RVC decoder (NVIDIA)
+    engine_cache_dir: str = "engine_cache"
+    vad: bool = False  # default for the Silero VAD gate (also settable per session via update_settings "vad")

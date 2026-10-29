@@ -6,9 +6,11 @@ class RVCSettings:
     gpu: int = -9999
     dstId: int = 0
 
-    f0Detector: str = "rmvpe_onnx"  # dio or harvest
+    f0Detector: str = "rmvpe"  # rmvpe (gpu, default), fcpe (gpu), crepe*, dio, harvest
     tran: int = 12
     silentThreshold: float = 0.00001
+    vad: int = 0  # 1: Silero VAD gate (skips the GPU while nobody speaks)
+    vadThreshold: float = 0.4
     extraConvertSize: int = 1024 * 4
 
     indexRatio: float = 0
@@ -22,6 +24,7 @@ class RVCSettings:
     # enableDirectML: int = 0  # 0:off, 1:on
     # ↓mutableな物だけ列挙
     intData = [
+        "vad",
         "gpu",
         "dstId",
         "tran",
@@ -29,5 +32,5 @@ class RVCSettings:
         "rvcQuality",
         "silenceFront",
     ]
-    floatData = ["silentThreshold", "indexRatio", "protect"]
+    floatData = ["silentThreshold", "indexRatio", "protect", "vadThreshold"]
     strData = ["f0Detector"]

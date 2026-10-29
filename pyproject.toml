@@ -42,7 +42,7 @@ legacy = [
 ]
 # TensorRT engines for the synthesizer (NVIDIA only)
 tensorrt = [
-    "tensorrt-cu12>=10.6",
+    "tensorrt-cu12>=10.6,<11",
 ]
 dev = [
     "pytest>=8",

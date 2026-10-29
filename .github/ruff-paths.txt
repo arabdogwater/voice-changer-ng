@@ -12,3 +12,6 @@ server/voice_changer/utils/resample.py
 server/downloader/WeightDownloader.py
 bench
 tests
+server/voice_changer/utils/vad.py
+server/voice_changer/RVC/inferencer/trt_decoder.py
+server/tools/build_trt_engines.py

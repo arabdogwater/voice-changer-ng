@@ -42,6 +42,7 @@ class RVCr2(VoiceChangerModel):
         EmbedderManager.initialize(params)
         PitchExtractorManager.initialize(params)
         self.settings = RVCSettings()
+        self.settings.vad = int(getattr(params, "vad", False))
         self.params = params
         # self.pitchExtractor = PitchExtractorManager.getPitchExtractor(self.settings.f0Detector, self.settings.gpu)
 
@@ -117,6 +118,24 @@ class RVCr2(VoiceChangerModel):
             return x
         return self._resampler(orig, new, x.device)(x.unsqueeze(0)).squeeze(0)
 
+    def _vad_open(self, chunk: np.ndarray) -> bool:
+        if not self.settings.vad:
+            return True
+        vad = self.__dict__.get("_vad")
+        if vad is None:
+            from downloader.WeightDownloader import ensureWeights, weightPath
+            from voice_changer.utils.vad import SileroVAD
+
+            try:
+                ensureWeights(self.params, ["silero_vad"])
+                vad = self._vad = SileroVAD(weightPath(self.params, "silero_vad"))
+            except Exception as e:  # never let the gate take the voice changer down
+                logger.warning(f"[Voice Changer] VAD unavailable, gate disabled: {e}")
+                self.settings.vad = 0
+                return True
+        vad.threshold = self.settings.vadThreshold
+        return vad.is_open(chunk, self.inputSampleRate)
+
     def generate_input(
         self,
         newData: torch.Tensor,
@@ -184,7 +203,7 @@ class RVCr2(VoiceChangerModel):
 
         audio, pitchf, feature, convertSize, outSize = self.generate_input(audio16, crossfade_frame, sola_search_frame, extra_frame)
 
-        if vol < self.settings.silentThreshold:
+        if vol < self.settings.silentThreshold or not self._vad_open(chunk):
             return np.zeros(convertSize).astype(np.int16) * np.sqrt(vol)
 
         repeat = 1 if self.settings.rvcQuality else 0

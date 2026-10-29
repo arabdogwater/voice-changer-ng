@@ -47,6 +47,20 @@ class Inferencer(Protocol):
         }
 
 
+def attach_tensorrt(model: torch.nn.Module, file: str):
+    """Opt-in TensorRT decoder (server flag --tensorrt). Silently skipped when TensorRT is not installed."""
+    from voice_changer.VoiceChangerParamsManager import VoiceChangerParamsManager
+
+    params = VoiceChangerParamsManager.get_instance().params
+    if params is None or not getattr(params, "tensorrt", False) or not hasattr(model.dec, "m_source"):
+        return model
+    from voice_changer.RVC.inferencer.trt_decoder import TrtDecoderCache, tensorrt_available
+
+    if tensorrt_available():
+        model.trt_decoder = TrtDecoderCache(file, model.dec, params.engine_cache_dir)
+    return model
+
+
 def optimize_for_inference(model: torch.nn.Module) -> torch.nn.Module:
     """Fold weight norm into plain weights and drop the training-only posterior encoder.
 

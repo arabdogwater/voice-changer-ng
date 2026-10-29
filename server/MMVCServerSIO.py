@@ -74,6 +74,9 @@ def setupArgParser():
     parser.add_argument("--rmvpe", type=str, default="pretrain/rmvpe.pt", help="path to rmvpe")
     parser.add_argument("--rmvpe_onnx", type=str, default="pretrain/rmvpe.onnx", help="path to rmvpe onnx")
 
+    parser.add_argument("--launch_client", type=str, default="browser", choices=["browser", "native", "none"], help="open the UI in the default browser (default), the legacy Electron client, or nothing")
+    parser.add_argument("--vad", type=strtobool, default=False, help="gate conversion with Silero VAD: no GPU work while nobody speaks")
+    parser.add_argument("--tensorrt", type=strtobool, default=False, help="accelerate the RVC decoder with TensorRT fp16 engines (built once per model and chunk size in the background, cached in engine_cache/)")
     parser.add_argument("--download_all_weights", type=strtobool, default=False, help="pre-download every pretrained weight at boot instead of on first use")
     parser.add_argument("--host", type=str, default='127.0.0.1', help="IP address of the network interface to listen for HTTP connections. Specify 0.0.0.0 to listen on all interfaces.")
     parser.add_argument("--allowed-origins", action='append', default=[], help="List of URLs to allow connection from, i.e. https://example.com. Allows http(s)://127.0.0.1:{port} and http(s)://localhost:{port} by default.")
@@ -121,6 +124,8 @@ voiceChangerParams = VoiceChangerParams(
     rmvpe_onnx=args.rmvpe_onnx,
     sample_mode=args.sample_mode,
     whisper_tiny=args.whisper_tiny,
+    tensorrt=args.tensorrt,
+    vad=args.vad,
 )
 vcparams = VoiceChangerParamsManager.get_instance()
 vcparams.setParams(voiceChangerParams)
@@ -262,6 +267,14 @@ if __name__ == "__main__":
     else:
         p = mp.Process(name="p", target=localServer, args=(args.logLevel,))
         p.start()
+        if args.launch_client == "browser":
+            # the web UI is the same app the Electron client wrapped; any browser runs it
+            import webbrowser
+
+            webbrowser.open(f"http://localhost:{PORT}/")
+        if args.launch_client != "native":
+            p.join()
+            sys.exit(0)
         try:
             if sys.platform.startswith("win"):
                 process = subprocess.Popen([NATIVE_CLIENT_FILE_WIN, "--disable-gpu", "-u", f"http://localhost:{PORT}/"])

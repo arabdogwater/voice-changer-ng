@@ -102,7 +102,7 @@ class VoiceChangerManager(ServerDeviceCallbacks):
         saveItemForServerDevice = ["enableServerAudio", "serverAudioSampleRate", "serverInputDeviceId", "serverOutputDeviceId", "serverMonitorDeviceId", "serverReadChunkSize", "serverInputAudioGain", "serverOutputAudioGain"]
         saveItemForVoiceChanger = ["crossFadeOffsetRate", "crossFadeEndRate", "crossFadeOverlapSize"]
         saveItemForVoiceChangerManager = ["modelSlotIndex"]
-        saveItemForRVC = ["extraConvertSize", "gpu", "silentThreshold"]
+        saveItemForRVC = ["extraConvertSize", "gpu", "silentThreshold", "vad", "vadThreshold"]
         saveItemForAllVoiceChanger = ["f0Detector"]  # 設定されたf0DetectorがVCに存在しない値の場合はデフォルトに落ちるように実装すること
 
         saveItem = []

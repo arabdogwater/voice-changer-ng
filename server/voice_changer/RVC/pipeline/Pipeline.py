@@ -64,6 +64,8 @@ class Pipeline(object):
         self.featDtype = torch.float16 if isHalf else torch.float32
         self.use_cuda_graphs = True
         self.graphs = GraphCache()
+        self.parallel_streams = device.type == "cuda"
+        self._side_stream = torch.cuda.Stream(device) if self.parallel_streams else None
 
     def getPipelineInfo(self):
         inferencerInfo = self.inferencer.getInferencerInfo() if self.inferencer else {}
@@ -161,7 +163,8 @@ class Pipeline(object):
         # values the user drags around stay tensors, so moving a slider never forces a re-capture
         knobs = torch.tensor([sid, f0_up_key, index_rate, protect], dtype=torch.float32).to(self.device, non_blocking=True)
 
-        plan = (audio.shape[0], pitchf.shape[0], tuple(feature.shape), has_f0, silence_front, int(embOutputLayer), bool(useFinalProj), t_pad, t_pad_tgt, out_size, search_index, use_protect)
+        trt = getattr(getattr(self.inferencer, "model", None), "trt_decoder", None)
+        plan = (audio.shape[0], pitchf.shape[0], tuple(feature.shape), has_f0, silence_front, int(embOutputLayer), bool(useFinalProj), t_pad, t_pad_tgt, out_size, search_index, use_protect, trt.generation if trt is not None else -1)
 
         def core(audio, pitchf, feature, knobs):
             return self._core(audio, pitchf, feature, knobs, plan)
@@ -183,15 +186,25 @@ class Pipeline(object):
 
     def _core(self, audio, pitchf, feature, knobs, plan):
         """GPU work for one chunk: fixed shapes and no host syncs, so it can be captured as a CUDA graph."""
-        _, _, _, has_f0, silence_front, embOutputLayer, useFinalProj, t_pad, t_pad_tgt, out_size, search_index, use_protect = plan
+        _, _, _, has_f0, silence_front, embOutputLayer, useFinalProj, t_pad, t_pad_tgt, out_size, search_index, use_protect, _ = plan
         sid = knobs[0:1].long()
         f0_up_key, index_rate, protect = knobs[1], knobs[2], knobs[3]
 
         audio_pad = F.pad(audio.unsqueeze(0), (t_pad, t_pad), mode="reflect").squeeze(0) if t_pad > 0 else audio
         p_len = audio_pad.shape[0] // self.window
 
-        pitch, pitchf = self.extractPitch(audio_pad, 1 if has_f0 else 0, pitchf, f0_up_key, silence_front)
-        feats = self.extractFeatures(audio_pad.view(1, -1), embOutputLayer, useFinalProj)
+        # pitch and features are independent: run them on two streams so their small kernels overlap
+        if self.parallel_streams and audio_pad.is_cuda:
+            main = torch.cuda.current_stream()
+            side = self._side_stream
+            side.wait_stream(main)
+            with torch.cuda.stream(side):
+                pitch, pitchf = self.extractPitch(audio_pad, 1 if has_f0 else 0, pitchf, f0_up_key, silence_front)
+            feats = self.extractFeatures(audio_pad.view(1, -1), embOutputLayer, useFinalProj)
+            main.wait_stream(side)
+        else:
+            pitch, pitchf = self.extractPitch(audio_pad, 1 if has_f0 else 0, pitchf, f0_up_key, silence_front)
+            feats = self.extractFeatures(audio_pad.view(1, -1), embOutputLayer, useFinalProj)
 
         if search_index:
             # the history part (silence_front) keeps last chunk's retrieved features

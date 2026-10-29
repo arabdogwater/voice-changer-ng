@@ -23,6 +23,7 @@ WEIGHTS = {
     "content_vec_500_onnx": ("content_vec_500_onnx", f"{HF}/wok000/weights_gpl/resolve/main/content-vec/contentvec-f.onnx"),
     "rmvpe": ("rmvpe", f"{HF}/wok000/weights/resolve/main/rmvpe/rmvpe_20231006.pt"),
     "rmvpe_onnx": ("rmvpe_onnx", f"{HF}/wok000/weights_gpl/resolve/main/rmvpe/rmvpe_20231006.onnx"),
+    "silero_vad": (lambda p: os.path.join(os.path.dirname(p.rmvpe), "silero_vad.onnx"), "https://github.com/snakers4/silero-vad/raw/v5.1.2/src/silero_vad/data/silero_vad.onnx"),
     "whisper_tiny": ("whisper_tiny", "https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt"),
 }
 
